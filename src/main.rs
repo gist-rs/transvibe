@@ -3,12 +3,11 @@ use crossterm::event::KeyModifiers;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use futures_util::StreamExt;
 use kalosm::language::*;
-use kalosm::sound::rodio::buffer::SamplesBuffer;
 use kalosm::sound::*;
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +19,7 @@ enum AppUpdate {
     LiveJapaneseUpdate(String),
     JapaneseSegmentComplete(String),
     EnglishTranslation(String),
+    SamplesProcessed(usize), // Added to track processed samples
     StatusUpdate(String),
     Error(String),
 }
@@ -45,10 +45,11 @@ struct App {
     japanese_scroll: usize,
     english_scroll_state: ScrollbarState,
     english_scroll: usize,
+    total_samples_listened: usize, // Added to accumulate listened samples
 }
 
 impl App {
-    fn new(rx: mpsc::Receiver<AppUpdate>, is_listening_shared: Arc<AtomicBool>) -> Self {
+    fn new(rx: mpsc::Receiver<AppUpdate>) -> Self {
         Self {
             status: "Initializing... Press 's' to Stop/Start, 'q' to Quit".to_string(),
             current_live_japanese: String::new(),
@@ -63,6 +64,7 @@ impl App {
             japanese_scroll: 0,
             english_scroll_state: ScrollbarState::default(),
             english_scroll: 0,
+            total_samples_listened: 0, // Initialize listened samples
         }
     }
 
@@ -118,6 +120,9 @@ impl App {
                         .push("[Pending Translation]".to_string());
                 }
             }
+            AppUpdate::SamplesProcessed(samples) => {
+                self.total_samples_listened += samples;
+            }
             AppUpdate::Error(e) => {
                 self.status = format!("ERROR: {}", e);
                 // Potentially log to a file or display more prominently
@@ -125,7 +130,7 @@ impl App {
         }
     }
 
-    fn run(mut self, mut terminal: Terminal<impl Backend>) -> Result<()> {
+    fn run(&mut self, terminal: &mut Terminal<impl Backend>) -> Result<()> {
         while !self.should_quit {
             terminal.draw(|frame| self.render(frame))?;
             self.handle_events()?;
@@ -249,12 +254,15 @@ impl App {
                 Constraint::Length(3), // Live Japanese
                 Constraint::Min(0),    // History
             ])
-            .split(frame.size());
+            .split(frame.area());
 
         // General Status/Help Message
         let help_text = match self.input_mode {
             AppInputMode::Listening => {
-                "Status: ".to_string() + &self.status + " (Press 's' to Stop, 'q' to Quit)"
+                format!(
+                    "Status: {} ({} samples processed) (Press 's' to Stop, 'q' to Quit)",
+                    self.status, self.total_samples_listened
+                )
             }
             AppInputMode::StoppedTyping => {
                 "Status: ".to_string()
@@ -486,6 +494,8 @@ async fn audio_processing_task(
         )))
         .await
         .ok();
+        // Send the number of samples processed in this chunk
+        tx.send(AppUpdate::SamplesProcessed(chunk_size)).await.ok();
 
         // tx.send(AppUpdate::StatusUpdate("Transcribing audio...".to_string()))
         //     .await
@@ -589,6 +599,9 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         if let Err(e) = audio_processing_task(tx_audio, is_listening_audio_task).await {
             // Send error to UI if task fails
+            // The tx channel might be closed if the main app loop has already exited.
+            // We use a let _ to ignore the result of the send, as there's not much we can do
+            // if sending fails here (the UI part is likely gone).
             let _ = tx
                 .send(AppUpdate::Error(format!(
                     "Audio processing task failed: {}",
@@ -608,20 +621,26 @@ async fn main() -> Result<()> {
     )?;
     terminal.clear()?; // Clear terminal before first draw
 
-    let app = App::new(rx, is_listening_shared.clone());
-    let app_result = app.run(terminal);
+    let mut app = App::new(rx); // app needs to be mutable to call run
+    let app_result = app.run(&mut terminal); // Pass a mutable reference to terminal
 
     // Restore terminal
     crossterm::execute!(
-        std::io::stdout(), // Use stdout directly for restore
+        terminal.backend_mut(), // Use terminal.backend_mut() for restore as well
         crossterm::terminal::LeaveAlternateScreen,
         crossterm::event::DisableMouseCapture
     )?;
     crossterm::terminal::disable_raw_mode()?;
 
+    // The terminal is dropped here, which should restore the original screen.
+    // Explicitly restoring is good practice though.
+
     if let Err(err) = app_result {
-        println!("Error running app: {:?}", err);
-        return Err(err.into());
+        // It's good to print the error to stderr if the application fails
+        // before the terminal is fully restored, or if restoration itself fails.
+        eprintln!("Error running app: {:?}", err);
+        // Ensure color_eyre's hook can run by returning the error
+        return Err(err); // No need for .into() if app.run returns color_eyre::Result
     }
 
     Ok(())
