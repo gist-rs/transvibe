@@ -12,3 +12,10 @@ kalosm = { version = "0.4.0", features = ["language", "metal", "sound", "surreal
 ratatui = "0.29.0"
 surrealdb = { version = "2.3.2", features = ["kv-surrealkv"] }
 tokio = { version = "1.45.0", features = ["macros"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
