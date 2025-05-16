@@ -48,8 +48,6 @@ struct App {
     english_scroll: u16,
     total_samples_listened: usize,
     raw_samples_count: usize,
-    autoscroll_japanese: bool,
-    autoscroll_english: bool,
 }
 
 impl App {
@@ -70,8 +68,6 @@ impl App {
             english_scroll: 0,
             total_samples_listened: 0,
             raw_samples_count: 0,
-            autoscroll_japanese: true,
-            autoscroll_english: true,
         }
     }
 
@@ -80,55 +76,51 @@ impl App {
             AppUpdate::StatusUpdate(s) => self.status = s,
             AppUpdate::LiveJapaneseUpdate(s) => self.current_live_japanese = s,
             AppUpdate::JapaneseSegmentComplete(jp_text) => {
-                self.completed_japanese.push(jp_text);
+                self.completed_japanese.insert(0, jp_text);
                 self.current_live_japanese.clear();
-                // Keep lists of the same length, add placeholder if translation is pending
-                if self.completed_translations.len() < self.completed_japanese.len() {
-                    self.completed_translations
-                        .push("Translating...".to_string());
+                // Always insert a placeholder for the new Japanese text at the beginning
+                self.completed_translations.insert(0, "Translating...".to_string());
+
+                // Defensive: Ensure translation list doesn't grow longer than Japanese list.
+                while self.completed_translations.len() > self.completed_japanese.len() {
+                    self.completed_translations.pop(); // Remove from the end (oldest assumed extras)
                 }
-                self.autoscroll_japanese = true;
-                self.autoscroll_english = true;
             }
             AppUpdate::EnglishTranslation(en_text) => {
                 let jp_len = self.completed_japanese.len();
                 let tr_len = self.completed_translations.len();
 
-                // Ideal case: translation corresponds to the last Japanese segment for which a placeholder exists.
-                if tr_len > 0
-                    && tr_len == jp_len
-                    && self.completed_translations[tr_len - 1] == "Translating..."
-                {
-                    self.completed_translations[tr_len - 1] = en_text;
+                // Try to update the placeholder at the beginning (index 0), as it's the newest.
+                if tr_len > 0 && self.completed_translations[0] == "Translating..." {
+                    self.completed_translations[0] = en_text;
                 }
-                // Fallback: find the most recent "Translating..." placeholder and update it.
+                // Fallback: find the earliest "Translating..." placeholder and update it.
+                // This covers cases where translations might arrive out of order for older segments.
                 else if let Some(index) = self
                     .completed_translations
                     .iter()
-                    .rposition(|t| t == "Translating...")
+                    .position(|t| t == "Translating...")
                 {
                     self.completed_translations[index] = en_text;
                 }
-                // Further fallback: if lengths allow, append new translation.
+                // Further fallback: if no placeholder is found and lengths allow, insert new translation at the top.
+                // This case should be rare if JapaneseSegmentComplete always adds a placeholder.
                 else if tr_len < jp_len {
-                    // This implies a Japanese text exists, but no "Translating..." placeholder was found for it.
-                    // We'll append the translation, assuming it's for the latest segment.
-                    self.completed_translations.push(en_text);
+                    self.completed_translations.insert(0, en_text);
                 }
-                // If none of the above, the translation might be an anomaly.
-                // For now, we let the cleanup logic below adjust list lengths.
+                // If none of the above (e.g. tr_len >= jp_len and no placeholder found),
+                // the translation might be an anomaly or for an already translated segment.
+                // We'll let the cleanup logic below adjust list lengths if necessary.
 
-                // Ensure translation list doesn't grow longer than Japanese list.
+                // Defensive: Ensure translation list doesn't grow excessively longer than Japanese list.
                 while self.completed_translations.len() > self.completed_japanese.len() {
-                    self.completed_translations.pop();
+                    self.completed_translations.pop(); // Remove from the end
                 }
-                // Ensure there's a placeholder if a Japanese text exists without a corresponding translation/placeholder.
-                // This is defensive, in case the "Translating..." wasn't added or was prematurely removed.
+                // Defensive: Ensure every Japanese text has a corresponding translation/placeholder.
+                // New placeholders are inserted at the beginning to match the Japanese text insertion.
                 while self.completed_translations.len() < self.completed_japanese.len() {
-                    self.completed_translations
-                        .push("[Pending Translation]".to_string());
+                    self.completed_translations.insert(0, "[Pending Translation]".to_string());
                 }
-                self.autoscroll_english = true;
             }
             AppUpdate::SamplesProcessed(samples) => {
                 self.total_samples_listened += samples;
@@ -342,13 +334,12 @@ impl App {
             .split(main_layout[2]);
 
         // Japanese Transcript Panel
-        let num_japanese_lines = self.completed_japanese.len();
         let japanese_lines: Vec<Line> = self // These are already styled lines
             .completed_japanese
             .iter()
             .enumerate()
             .map(|(i, s)| {
-                let style = if i == num_japanese_lines.saturating_sub(1) {
+                let style = if i == 0 { // Highlight the first line (newest)
                     Style::new().fg(Color::White)
                 } else {
                     Style::new().fg(Color::DarkGray)
@@ -357,7 +348,6 @@ impl App {
             })
             .collect();
 
-        let japanese_panel_area = history_layout[0];
         let japanese_block = Block::default()
             .title("Japanese Transcript")
             .borders(Borders::ALL);
@@ -368,20 +358,7 @@ impl App {
             .japanese_scroll_state
             .content_length(self.completed_japanese.len());
 
-        // Auto-scroll Japanese panel
-        if self.autoscroll_japanese && !self.completed_japanese.is_empty() {
-            let num_items = self.completed_japanese.len();
-            // Calculate available height for text within the panel (panel height - 2 for borders)
-            let panel_text_height_jp = japanese_panel_area.height.saturating_sub(2).max(1);
-
-            // Scroll to show the last `panel_text_height_jp` items.
-            // If num_items <= panel_text_height_jp, scroll_offset will be 0.
-            self.japanese_scroll = num_items.saturating_sub(panel_text_height_jp as usize).max(0);
-            
-            // Scroll scrollbar to last item
-            self.japanese_scroll_state = self.japanese_scroll_state.position(num_items.saturating_sub(1));
-            self.autoscroll_japanese = false; // Reset autoscroll flag
-        }
+        // Auto-scroll logic removed. Scrolling is now manual.
 
         let japanese_paragraph = Paragraph::new(japanese_lines)
             .block(japanese_block)
@@ -397,13 +374,12 @@ impl App {
         );
 
         // English Translation Panel
-        let num_english_lines = self.completed_translations.len();
         let english_lines: Vec<Line> = self // These are already styled lines
             .completed_translations
             .iter()
             .enumerate()
             .map(|(i, s)| {
-                let style = if i == num_english_lines.saturating_sub(1) {
+                let style = if i == 0 { // Highlight the first line (newest)
                     Style::new().fg(Color::White)
                 } else {
                     Style::new().fg(Color::DarkGray)
@@ -412,7 +388,6 @@ impl App {
             })
             .collect();
 
-        let english_panel_area = history_layout[1];
         let english_block = Block::default()
             .title("English Translation")
             .borders(Borders::ALL);
@@ -424,20 +399,7 @@ impl App {
             .english_scroll_state
             .content_length(self.completed_translations.len());
 
-        // Auto-scroll English panel
-        if self.autoscroll_english && !self.completed_translations.is_empty() {
-            let num_items = self.completed_translations.len();
-            // Calculate available height for text within the panel (panel height - 2 for borders)
-            let panel_text_height_en = english_panel_area.height.saturating_sub(2).max(1);
-
-            // Scroll to show the last `panel_text_height_en` items.
-            // If num_items <= panel_text_height_en, scroll_offset will be 0.
-            self.english_scroll = num_items.saturating_sub(panel_text_height_en as usize).max(0) as u16;
-            
-            // Scroll scrollbar to last item
-            self.english_scroll_state = self.english_scroll_state.position(num_items.saturating_sub(1));
-            self.autoscroll_english = false; // Reset autoscroll flag
-        }
+        // Auto-scroll logic removed. Scrolling is now manual.
 
         let english_paragraph = Paragraph::new(english_lines)
             .block(english_block)
