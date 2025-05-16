@@ -384,7 +384,7 @@ impl App {
             )
             .style(Style::default().fg(Color::White))
             .wrap(Wrap { trim: true })
-            .scroll((self.english_scroll as u16, 0));
+            .scroll((self.english_scroll, 0));
         frame.render_widget(english_paragraph, history_layout[1]);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -515,7 +515,7 @@ async fn audio_processing_task(
         };
 
         // Indicate that an audio chunk has been received and provide its size
-        let chunk_size = input_audio_chunk.size_hint(); // Get number of samples directly from SamplesBuffer
+        let chunk_size = input_audio_chunk.clone().count(); // Get number of samples directly from SamplesBuffer
         tx.send(AppUpdate::StatusUpdate(format!(
             "Processing audio chunk ({:#?} samples)...",
             chunk_size
@@ -523,9 +523,7 @@ async fn audio_processing_task(
         .await
         .ok();
         // Send the number of samples processed in this chunk for this segment
-        tx.send(AppUpdate::SamplesProcessed(chunk_size.0))
-            .await
-            .ok();
+        tx.send(AppUpdate::SamplesProcessed(chunk_size)).await.ok();
 
         // tx.send(AppUpdate::StatusUpdate("Transcribing audio...".to_string()))
         //     .await
