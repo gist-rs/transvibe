@@ -3,6 +3,7 @@ use crossterm::event::KeyModifiers;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use futures_util::StreamExt;
 use kalosm::language::*;
+use kalosm::sound::rodio::buffer::SamplesBuffer;
 use kalosm::sound::*;
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::{
@@ -452,84 +453,6 @@ async fn audio_processing_task(
         .voice_activity_stream()
         .rechunk_voice_activity();
 
-    // ---- START MOCK STREAM WITH LLAMA TRANSLATION FOR TESTING ----
-    tx.send(AppUpdate::StatusUpdate(
-        "Starting mock Japanese input stream (Llama translation)...".to_string(),
-    ))
-    .await
-    .ok();
-
-    let mock_japanese_sentences = vec![
-        "最初のテスト文です。",
-        "これは二番目です。",
-        "三番目のメッセージ。",
-        "今日の天気はどうですか。",
-    ];
-
-    for jp_text in mock_japanese_sentences {
-        tx.send(AppUpdate::JapaneseSegmentComplete(jp_text.to_string()))
-            .await
-            .ok();
-
-        tx.send(AppUpdate::StatusUpdate(format!(
-            "Mock: Requesting Llama translation for '{}'...",
-            jp_text
-        )))
-        .await
-        .ok();
-
-        // Call Llama for translation
-        let prompt = format!(
-            "Translate the following Japanese text to English, Output only the English translation. Do not add any pleasantries or extra explanations: '{}'",
-            jp_text
-        );
-        let mut response_stream = llama_chat(&prompt);
-        let translation = response_stream.all_text().await;
-        // println!("[Debug Llama Output for Mock]: '{}' -> '{}'", jp_text, translation); // Log Llama's direct output for mock
-
-        let status_translation_excerpt = if translation.len() > 20 {
-            let mut end_index = 20;
-            if translation.is_empty() {
-                end_index = 0;
-            } else {
-                while end_index > 0 && !translation.is_char_boundary(end_index) {
-                    end_index -= 1;
-                }
-            }
-            format!("{}...", &translation[..end_index])
-        } else {
-            translation.clone()
-        };
-        tx.send(AppUpdate::StatusUpdate(format!(
-            "Mock: Llama translation received: {}",
-            status_translation_excerpt
-        )))
-        .await
-        .ok();
-
-        if !translation.is_empty() {
-            tx.send(AppUpdate::EnglishTranslation(translation))
-                .await
-                .ok();
-        } else {
-            tx.send(AppUpdate::EnglishTranslation(
-                "[No translation generated for mock]".to_string(),
-            ))
-            .await
-            .ok();
-        }
-
-        // Simulate a brief pause as if waiting for next speech segment
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await; // Increased delay to observe
-    }
-
-    tx.send(AppUpdate::StatusUpdate(
-        "Mock stream finished. Listening for microphone input...".to_string(),
-    ))
-    .await
-    .ok();
-    // ---- END MOCK STREAM FOR TESTING UI ----
-
     loop {
         if !is_listening_shared.load(Ordering::Relaxed) {
             // If not listening, sleep for a bit and check again.
@@ -555,9 +478,18 @@ async fn audio_processing_task(
             Err(_) => continue, // Timeout, loop back to check is_listening_shared
         };
 
-        tx.send(AppUpdate::StatusUpdate("Transcribing audio...".to_string()))
-            .await
-            .ok();
+        // Indicate that an audio chunk has been received and provide its size
+        let chunk_size = input_audio_chunk.size_hint().0; // Get number of samples from iterator's size_hint
+        tx.send(AppUpdate::StatusUpdate(format!(
+            "Processing audio chunk ({} samples)...",
+            chunk_size
+        )))
+        .await
+        .ok();
+
+        // tx.send(AppUpdate::StatusUpdate("Transcribing audio...".to_string()))
+        //     .await
+        //     .ok(); // This line is now replaced by the more specific one above or the one below after transcription
         let mut current_segment_text = String::new();
         let mut transcribed_stream = whisper_model.transcribe(input_audio_chunk);
 
@@ -588,12 +520,12 @@ async fn audio_processing_task(
             .await
             .ok();
             let prompt = format!(
-                "Translate the following Japanese text to English: '{}'",
+                "Translate the following Japanese text to English, Output only the English translation. Do not add any pleasantries or extra explanations: '{}'",
                 current_segment_text
             );
             let mut response_stream = llama_chat(&prompt);
             let translation = response_stream.all_text().await; // Use all_text()
-            println!("[Debug Llama Output Live]: {}", translation); // Clarified log source
+            // println!("[Debug Llama Output Live]: {}", translation); // Clarified log source
 
             let status_translation_excerpt = if translation.len() > 20 {
                 let mut end_index = 20;
