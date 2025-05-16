@@ -295,10 +295,10 @@ impl App {
             text_widget = text_widget.style(Style::default().fg(Color::Cyan)); // Style for typing mode
             // Set cursor position for typing mode
             #[allow(clippy::cast_possible_truncation)]
-            frame.set_cursor(
+            frame.set_cursor_position(Position::new(
                 main_layout[1].x + self.user_input.chars().count() as u16 + 1,
                 main_layout[1].y + 1,
-            );
+            ));
         } else if self.current_live_japanese.is_empty()
             && self.input_mode == AppInputMode::Listening
             && self.status.contains("Listening")
