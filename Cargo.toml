@@ -5,7 +5,10 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.98"
+color-eyre = "0.6.4"
+crossterm = "0.29.0"
 futures-util = "0.3.31"
 kalosm = { version = "0.4.0", features = ["language", "metal", "sound", "surrealdb"] }
+ratatui = "0.29.0"
 surrealdb = { version = "2.3.2", features = ["kv-surrealkv"] }
 tokio = { version = "1.45.0", features = ["macros"] }
