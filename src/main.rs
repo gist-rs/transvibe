@@ -48,6 +48,8 @@ struct App {
     english_scroll: u16,
     total_samples_listened: usize,
     raw_samples_count: usize,
+    autoscroll_japanese: bool,
+    autoscroll_english: bool,
 }
 
 impl App {
@@ -68,6 +70,8 @@ impl App {
             english_scroll: 0,
             total_samples_listened: 0,
             raw_samples_count: 0,
+            autoscroll_japanese: true,
+            autoscroll_english: true,
         }
     }
 
@@ -83,6 +87,8 @@ impl App {
                     self.completed_translations
                         .push("Translating...".to_string());
                 }
+                self.autoscroll_japanese = true;
+                self.autoscroll_english = true;
             }
             AppUpdate::EnglishTranslation(en_text) => {
                 let jp_len = self.completed_japanese.len();
@@ -122,6 +128,7 @@ impl App {
                     self.completed_translations
                         .push("[Pending Translation]".to_string());
                 }
+                self.autoscroll_english = true;
             }
             AppUpdate::SamplesProcessed(samples) => {
                 self.total_samples_listened += samples;
@@ -335,25 +342,50 @@ impl App {
             .split(main_layout[2]);
 
         // Japanese Transcript Panel
-        let japanese_lines: Vec<Line> = self
+        let num_japanese_lines = self.completed_japanese.len();
+        let japanese_lines: Vec<Line> = self // These are already styled lines
             .completed_japanese
             .iter()
-            .map(|s| Line::from(s.as_str()))
+            .enumerate()
+            .map(|(i, s)| {
+                let style = if i == num_japanese_lines.saturating_sub(1) {
+                    Style::new().fg(Color::White)
+                } else {
+                    Style::new().fg(Color::DarkGray)
+                };
+                Line::from(s.as_str()).style(style)
+            })
             .collect();
-        let japanese_text_height = japanese_lines.len();
 
+        let japanese_panel_area = history_layout[0];
+        let japanese_block = Block::default()
+            .title("Japanese Transcript")
+            .borders(Borders::ALL);
+        let common_wrap_setting = Wrap { trim: true };
+
+        // Set scrollbar content length to number of items
         self.japanese_scroll_state = self
             .japanese_scroll_state
-            .content_length(japanese_text_height);
+            .content_length(self.completed_japanese.len());
+
+        // Auto-scroll Japanese panel
+        if self.autoscroll_japanese && !self.completed_japanese.is_empty() {
+            let num_items = self.completed_japanese.len();
+            // Calculate available height for text within the panel (panel height - 2 for borders)
+            let panel_text_height_jp = japanese_panel_area.height.saturating_sub(2).max(1);
+
+            // Scroll to show the last `panel_text_height_jp` items.
+            // If num_items <= panel_text_height_jp, scroll_offset will be 0.
+            self.japanese_scroll = num_items.saturating_sub(panel_text_height_jp as usize).max(0);
+            
+            // Scroll scrollbar to last item
+            self.japanese_scroll_state = self.japanese_scroll_state.position(num_items.saturating_sub(1));
+            self.autoscroll_japanese = false; // Reset autoscroll flag
+        }
 
         let japanese_paragraph = Paragraph::new(japanese_lines)
-            .block(
-                Block::default()
-                    .title("Japanese Transcript")
-                    .borders(Borders::ALL),
-            )
-            .style(Style::default().fg(Color::White))
-            .wrap(Wrap { trim: true }) // Trim false might be better for precise scrolling
+            .block(japanese_block)
+            .wrap(common_wrap_setting)
             .scroll((self.japanese_scroll as u16, 0));
         frame.render_widget(japanese_paragraph, history_layout[0]);
         frame.render_stateful_widget(
@@ -365,25 +397,51 @@ impl App {
         );
 
         // English Translation Panel
-        let english_lines: Vec<Line> = self
+        let num_english_lines = self.completed_translations.len();
+        let english_lines: Vec<Line> = self // These are already styled lines
             .completed_translations
             .iter()
-            .map(|s| Line::from(s.as_str()))
+            .enumerate()
+            .map(|(i, s)| {
+                let style = if i == num_english_lines.saturating_sub(1) {
+                    Style::new().fg(Color::White)
+                } else {
+                    Style::new().fg(Color::DarkGray)
+                };
+                Line::from(s.as_str()).style(style)
+            })
             .collect();
-        let english_text_height = english_lines.len();
 
+        let english_panel_area = history_layout[1];
+        let english_block = Block::default()
+            .title("English Translation")
+            .borders(Borders::ALL);
+        // Assuming same wrap setting as Japanese panel, can be customized if needed
+        let common_wrap_setting = Wrap { trim: true }; 
+
+        // Set scrollbar content length to number of items
         self.english_scroll_state = self
             .english_scroll_state
-            .content_length(english_text_height);
+            .content_length(self.completed_translations.len());
+
+        // Auto-scroll English panel
+        if self.autoscroll_english && !self.completed_translations.is_empty() {
+            let num_items = self.completed_translations.len();
+            // Calculate available height for text within the panel (panel height - 2 for borders)
+            let panel_text_height_en = english_panel_area.height.saturating_sub(2).max(1);
+
+            // Scroll to show the last `panel_text_height_en` items.
+            // If num_items <= panel_text_height_en, scroll_offset will be 0.
+            self.english_scroll = num_items.saturating_sub(panel_text_height_en as usize).max(0) as u16;
+            
+            // Scroll scrollbar to last item
+            self.english_scroll_state = self.english_scroll_state.position(num_items.saturating_sub(1));
+            self.autoscroll_english = false; // Reset autoscroll flag
+        }
 
         let english_paragraph = Paragraph::new(english_lines)
-            .block(
-                Block::default()
-                    .title("English Translation")
-                    .borders(Borders::ALL),
-            )
-            .style(Style::default().fg(Color::White))
-            .wrap(Wrap { trim: true })
+            .block(english_block)
+            .wrap(common_wrap_setting)
             .scroll((self.english_scroll, 0));
         frame.render_widget(english_paragraph, history_layout[1]);
         frame.render_stateful_widget(
