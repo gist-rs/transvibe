@@ -19,7 +19,8 @@ enum AppUpdate {
     LiveJapaneseUpdate(String),
     JapaneseSegmentComplete(String),
     EnglishTranslation(String),
-    SamplesProcessed(usize), // Added to track processed samples
+    SamplesProcessed(usize),
+    RawSamplesDetected(usize),
     StatusUpdate(String),
     Error(String),
 }
@@ -44,8 +45,9 @@ struct App {
     japanese_scroll_state: ScrollbarState,
     japanese_scroll: usize,
     english_scroll_state: ScrollbarState,
-    english_scroll: usize,
-    total_samples_listened: usize, // Added to accumulate listened samples
+    english_scroll: u16,
+    total_samples_listened: usize,
+    raw_samples_count: usize,
 }
 
 impl App {
@@ -64,7 +66,8 @@ impl App {
             japanese_scroll: 0,
             english_scroll_state: ScrollbarState::default(),
             english_scroll: 0,
-            total_samples_listened: 0, // Initialize listened samples
+            total_samples_listened: 0,
+            raw_samples_count: 0,
         }
     }
 
@@ -122,9 +125,13 @@ impl App {
             }
             AppUpdate::SamplesProcessed(samples) => {
                 self.total_samples_listened += samples;
+                self.raw_samples_count = 0; // Reset after final samples for transcribed segment reported
             }
-            AppUpdate::Error(e) => {
-                self.status = format!("ERROR: {}", e);
+            AppUpdate::RawSamplesDetected(samples) => {
+                self.raw_samples_count += samples;
+            }
+            AppUpdate::Error(err_msg) => {
+                self.status = format!("ERROR: {}", err_msg);
                 // Potentially log to a file or display more prominently
             }
         }
@@ -303,7 +310,11 @@ impl App {
             && self.input_mode == AppInputMode::Listening
             && self.status.contains("Listening")
         {
-            let listening_placeholder = Paragraph::new("Listening...")
+            let listening_text = format!(
+                "Listening... ({} samples processed this segment)",
+                self.raw_samples_count
+            );
+            let listening_placeholder = Paragraph::new(listening_text)
                 .wrap(Wrap { trim: true })
                 .block(input_block)
                 .style(Style::default().add_modifier(Modifier::ITALIC));
@@ -406,19 +417,23 @@ impl App {
     }
 
     fn scroll_english_down(&mut self) {
-        let content_height = self.completed_translations.len();
+        let content_height = self.completed_translations.len() as u16;
         if content_height > 0 {
             self.english_scroll = self.english_scroll.saturating_add(1);
             if self.english_scroll >= content_height {
                 self.english_scroll = content_height.saturating_sub(1);
             }
         }
-        self.english_scroll_state = self.english_scroll_state.position(self.english_scroll);
+        self.english_scroll_state = self
+            .english_scroll_state
+            .position(self.english_scroll as usize);
     }
 
     fn scroll_english_up(&mut self) {
         self.english_scroll = self.english_scroll.saturating_sub(1);
-        self.english_scroll_state = self.english_scroll_state.position(self.english_scroll);
+        self.english_scroll_state = self
+            .english_scroll_state
+            .position(self.english_scroll as usize);
     }
 }
 
@@ -456,9 +471,22 @@ async fn audio_processing_task(
     .ok();
 
     let mic_input = MicInput::default();
-    let mut audio_chunks = mic_input
-        .stream()
-        .voice_activity_stream()
+    let vad_stream = mic_input.stream().voice_activity_stream();
+    let tx_for_inspect = tx.clone(); // Clone tx for the inspect closure
+    let mut audio_chunks = vad_stream
+        .inspect(move |vad_output| {
+            // vad_output is &VoiceActivityDetectorOutput (or the item type of vad_stream)
+            // This assumes vad_output has a public field `samples` which is a `rodio::buffer::SamplesBuffer<f32>`
+            // as per the user-provided reference.
+            let samples_count = vad_output.samples.clone().count();
+            if samples_count > 0 {
+                // Use try_send to avoid blocking the audio thread.
+                // If the channel is full or disconnected, this will be a no-op.
+                tx_for_inspect
+                    .try_send(AppUpdate::RawSamplesDetected(samples_count))
+                    .ok();
+            }
+        })
         .rechunk_voice_activity();
 
     loop {
@@ -487,15 +515,17 @@ async fn audio_processing_task(
         };
 
         // Indicate that an audio chunk has been received and provide its size
-        let chunk_size = input_audio_chunk.size_hint().0; // Get number of samples from iterator's size_hint
+        let chunk_size = input_audio_chunk.size_hint(); // Get number of samples directly from SamplesBuffer
         tx.send(AppUpdate::StatusUpdate(format!(
-            "Processing audio chunk ({} samples)...",
+            "Processing audio chunk ({:#?} samples)...",
             chunk_size
         )))
         .await
         .ok();
-        // Send the number of samples processed in this chunk
-        tx.send(AppUpdate::SamplesProcessed(chunk_size)).await.ok();
+        // Send the number of samples processed in this chunk for this segment
+        tx.send(AppUpdate::SamplesProcessed(chunk_size.0))
+            .await
+            .ok();
 
         // tx.send(AppUpdate::StatusUpdate("Transcribing audio...".to_string()))
         //     .await
