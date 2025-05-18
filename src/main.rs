@@ -589,24 +589,31 @@ async fn audio_processing_task(
             );
             let mut llama_chat_clone = llama_chat_template.clone();
             let mut response_stream = llama_chat_clone(&prompt);
-            let translation = response_stream.all_text().await; // Use all_text()
-            // println!("[Debug Llama Output Live]: {}", translation); // Clarified log source
+            let raw_translation = response_stream.all_text().await; // Use all_text()
+            // println!("[Debug Llama Output Live]: {}", raw_translation); // Clarified log source
 
-            let status_translation_excerpt = if translation.len() > 20 {
+            // Clean the translation: remove special tokens and trim whitespace
+            let cleaned_translation = raw_translation
+                .replace("<|im_start|>", "")
+                .replace("<|im_end|>", "")
+                .trim()
+                .to_string();
+
+            let status_translation_excerpt = if cleaned_translation.len() > 20 {
                 let mut end_index = 20;
                 // Ensure we don't panic if the string is shorter than 20 bytes after all,
                 // or if the loop somehow goes below zero (though it shouldn't with valid UTF-8).
                 // We also need to check if the string is empty to avoid panicking on is_char_boundary(0) for an empty string.
-                if translation.is_empty() {
+                if cleaned_translation.is_empty() {
                     end_index = 0;
                 } else {
-                    while end_index > 0 && !translation.is_char_boundary(end_index) {
+                    while end_index > 0 && !cleaned_translation.is_char_boundary(end_index) {
                         end_index -= 1;
                     }
                 }
-                format!("{}...", &translation[..end_index])
+                format!("{}...", &cleaned_translation[..end_index])
             } else {
-                translation.clone()
+                cleaned_translation.clone()
             };
             tx.send(AppUpdate::StatusUpdate(format!(
                 "Llama call completed. Got: {}",
@@ -615,8 +622,8 @@ async fn audio_processing_task(
             .await
             .ok();
 
-            if !translation.is_empty() {
-                tx.send(AppUpdate::EnglishTranslation(translation))
+            if !cleaned_translation.is_empty() {
+                tx.send(AppUpdate::EnglishTranslation(cleaned_translation))
                     .await
                     .ok();
             } else {
