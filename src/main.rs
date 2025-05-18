@@ -12,12 +12,12 @@ use ratatui::{
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
 #[derive(Debug)]
 enum AppUpdate {
     LiveJapaneseUpdate(String),
-    JapaneseSegmentComplete { text: String, id: usize },
+    JapaneseSegmentComplete(String),
     EnglishTranslation(String),
     SamplesProcessed(usize),
     RawSamplesDetected(usize),
@@ -75,11 +75,7 @@ impl App {
         match update {
             AppUpdate::StatusUpdate(s) => self.status = s,
             AppUpdate::LiveJapaneseUpdate(s) => self.current_live_japanese = s,
-            AppUpdate::JapaneseSegmentComplete {
-                text: jp_text,
-                id: _segment_id,
-            } => {
-                // _segment_id is available if needed later
+            AppUpdate::JapaneseSegmentComplete(jp_text) => {
                 self.completed_japanese.insert(0, jp_text);
                 self.current_live_japanese.clear();
                 // Always insert a placeholder for the new Japanese text at the beginning
@@ -465,133 +461,44 @@ impl App {
     }
 }
 
-async fn translation_task(
-    mut transcription_rx: mpsc::Receiver<(String, usize)>,
-    ui_tx: mpsc::Sender<AppUpdate>,
-    mut shutdown_rx: watch::Receiver<()>,
-) -> Result<(), anyhow::Error> {
-    ui_tx
-        .send(AppUpdate::StatusUpdate(
-            "Initializing Llama model for translation...".to_string(),
-        ))
-        .await
-        .ok();
-
-    // Initialize Llama model here
-    let llama_model = Llama::builder()
-        .with_source(LlamaSource::qwen_2_5_7b_instruct()) // Or another suitable model
-        .build()
-        .await?;
-    let mut llama_chat = llama_model.chat().with_system_prompt("You are an expert translator. Translate the given Japanese text to English accurately and concisely. Output only the English translation. Do not add any pleasantries or extra explanations.");
-
-    ui_tx
-        .send(AppUpdate::StatusUpdate(
-            "Llama model loaded. Waiting for transcriptions...".to_string(),
-        ))
-        .await
-        .ok();
-
-    loop {
-        tokio::select! {
-            biased; // Prefer shutdown if both are ready
-            _ = shutdown_rx.changed() => {
-                eprintln!("Translation task: shutdown signal received.");
-                break;
-            }
-            message = transcription_rx.recv() => {
-                if let Some((japanese_text, segment_id)) = message {
-                    ui_tx
-                        .send(AppUpdate::StatusUpdate(format!(
-                            "Translating segment ID {} to English...",
-                            segment_id
-                        )))
-                        .await
-                        .ok();
-
-                    let prompt = format!(
-                        "Translate the following Japanese text to English, Output only the English translation. Do not add any pleasantries or extra explanations: '{}'",
-                        japanese_text
-                    );
-                    let mut response_stream = llama_chat(&prompt);
-                    let translation = response_stream.all_text().await;
-
-                    let status_translation_excerpt = if translation.len() > 20 {
-                        let mut end_index = 20;
-                        if translation.is_empty() {
-                            end_index = 0;
-                        } else {
-                            while end_index > 0 && !translation.is_char_boundary(end_index) {
-                                end_index -= 1;
-                            }
-                        }
-                        format!("{}...", &translation[..end_index])
-                    } else {
-                        translation.clone()
-                    };
-                    ui_tx
-                        .send(AppUpdate::StatusUpdate(format!(
-                            "Llama call completed for segment ID {}. Got: {}",
-                            segment_id, status_translation_excerpt
-                        )))
-                        .await
-                        .ok();
-
-                    if !translation.is_empty() {
-                        ui_tx
-                            .send(AppUpdate::EnglishTranslation(translation))
-                            .await
-                            .ok();
-                    } else {
-                        ui_tx
-                            .send(AppUpdate::EnglishTranslation(format!(
-                                "[No translation generated for segment ID {}]",
-                                segment_id
-                            )))
-                            .await
-                            .ok();
-                    }
-                } else {
-                    eprintln!("Translation task: transcription channel closed.");
-                    break; // Channel closed, exit
-                }
-            }
-        }
-    }
-    Ok(())
-}
+const SYSTEM_PROMPT: &str = "You are an expert translator. Translate the given Japanese text to English accurately and concisely. Output only the English translation. Do not add any pleasantries or extra explanations.";
 
 async fn audio_processing_task(
-    ui_tx: mpsc::Sender<AppUpdate>,
-    transcription_tx: mpsc::Sender<(String, usize)>,
-        is_listening_shared: Arc<AtomicBool>,
-        mut shutdown_rx: watch::Receiver<()>,
-    ) -> Result<(), anyhow::Error> {
-        let mut segment_id_counter: usize = 0; // Initialize segment ID counter
-
-    ui_tx
-        .send(AppUpdate::StatusUpdate(
-            "Initializing models...".to_string(),
-        ))
-        .await
-        .ok();
+    tx: mpsc::Sender<AppUpdate>,
+    is_listening_shared: Arc<AtomicBool>,
+) -> Result<(), anyhow::Error> {
+    tx.send(AppUpdate::StatusUpdate(
+        "Initializing models...".to_string(),
+    ))
+    .await
+    .ok();
 
     let whisper_model = WhisperBuilder::default()
         .with_language(Some(WhisperLanguage::Japanese)) // Specify Japanese
         .build()
         .await?;
 
-    ui_tx
-        .send(AppUpdate::StatusUpdate(
-            "Whisper model loaded. Ready for audio input.".to_string(),
-        ))
-        .await
-        .ok();
+    tx.send(AppUpdate::StatusUpdate(
+        "Whisper model loaded. Initializing Llama...".to_string(),
+    ))
+    .await
+    .ok();
 
-    // Llama model initialization and chat setup moved to translation_task
+    let llama_model = Llama::builder()
+        .with_source(LlamaSource::qwen_2_5_7b_instruct()) // Or another suitable model
+        .build()
+        .await?;
+    let llama_chat_template = llama_model.chat().with_system_prompt(SYSTEM_PROMPT);
+
+    tx.send(AppUpdate::StatusUpdate(
+        "All models loaded. Listening for microphone input...".to_string(),
+    ))
+    .await
+    .ok();
 
     let mic_input = MicInput::default();
     let vad_stream = mic_input.stream().voice_activity_stream();
-    let tx_for_inspect = ui_tx.clone(); // Clone ui_tx for the inspect closure
+    let tx_for_inspect = tx.clone(); // Clone tx for the inspect closure
     let mut audio_chunks = vad_stream
         .inspect(move |vad_output| {
             // vad_output is &VoiceActivityDetectorOutput (or the item type of vad_stream)
@@ -612,7 +519,7 @@ async fn audio_processing_task(
         if !is_listening_shared.load(Ordering::Relaxed) {
             // If not listening, sleep for a bit and check again.
             // Update status to indicate paused state if desired.
-            // ui_tx.send(AppUpdate::StatusUpdate("Audio processing paused...".to_string())).await.ok();
+            // tx.send(AppUpdate::StatusUpdate("Audio processing paused...".to_string())).await.ok();
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             continue;
         }
@@ -622,49 +529,29 @@ async fn audio_processing_task(
         // when is_listening_shared becomes false during its await.
         // For simplicity, we proceed with next().await.
         // A more robust solution might involve a select! with a shutdown signal.
-
-        let maybe_input_audio_chunk = tokio::select! {
-            biased; // Prefer shutdown if both are ready
-            _ = shutdown_rx.changed() => {
-                eprintln!("Audio processing task: shutdown signal received.");
-                return Ok(()); // Exit task gracefully
-            }
-            // Original timeout logic for getting audio chunk
-            res = tokio::time::timeout(
-                std::time::Duration::from_millis(50), // Short timeout to remain responsive to is_listening_shared
-                audio_chunks.next()
-            ) => res,
-        };
-
-        let input_audio_chunk = match maybe_input_audio_chunk {
+        let input_audio_chunk = match tokio::time::timeout(
+            std::time::Duration::from_millis(50), // Short timeout to remain responsive to is_listening_shared
+            audio_chunks.next(),
+        )
+        .await
+        {
             Ok(Some(chunk)) => chunk,
-            Ok(None) => { // Stream ended
-                eprintln!("Audio processing task: audio chunk stream ended.");
-                break;
-            }
-            Err(_) => { // Timeout from the select! (outer timeout) or inner timeout
-                // This means timeout occurred, check listening status and continue.
-                // This is the desired behavior when is_listening_shared is false, or no audio.
-                continue;
-            }
+            Ok(None) => break,  // Stream ended
+            Err(_) => continue, // Timeout, loop back to check is_listening_shared
         };
 
         // Indicate that an audio chunk has been received and provide its size
         let chunk_size = input_audio_chunk.clone().count(); // Get number of samples directly from SamplesBuffer
-        ui_tx
-            .send(AppUpdate::StatusUpdate(format!(
-                "Processing audio chunk ({:#?} samples)...",
-                chunk_size
-            )))
-            .await
-            .ok();
+        tx.send(AppUpdate::StatusUpdate(format!(
+            "Processing audio chunk ({:#?} samples)...",
+            chunk_size
+        )))
+        .await
+        .ok();
         // Send the number of samples processed in this chunk for this segment
-        ui_tx
-            .send(AppUpdate::SamplesProcessed(chunk_size))
-            .await
-            .ok();
+        tx.send(AppUpdate::SamplesProcessed(chunk_size)).await.ok();
 
-        // ui_tx.send(AppUpdate::StatusUpdate("Transcribing audio...".to_string()))
+        // tx.send(AppUpdate::StatusUpdate("Transcribing audio...".to_string()))
         //     .await
         //     .ok(); // This line is now replaced by the more specific one above or the one below after transcription
         let mut current_segment_text = String::new();
@@ -673,74 +560,80 @@ async fn audio_processing_task(
         while let Some(transcribed) = transcribed_stream.next().await {
             if transcribed.probability_of_no_speech() < 0.85 {
                 current_segment_text.push_str(transcribed.text());
-                ui_tx
-                    .send(AppUpdate::LiveJapaneseUpdate(current_segment_text.clone()))
+                tx.send(AppUpdate::LiveJapaneseUpdate(current_segment_text.clone()))
                     .await
                     .ok();
             }
         }
-
-        // Add a segment ID counter, initialize it before the loop
-        // static mut SEGMENT_ID_COUNTER: usize = 0; // This would require unsafe, prefer passing as arg or member
-        // For simplicity, let's assume it's initialized at the start of audio_processing_task
-        // and incremented. If audio_processing_task is restarted, it would reset.
-        // A more robust solution might involve an AtomicUsize or a shared counter.
-        // For now, a simple local counter:
-        // (This should be `let mut segment_id_counter: usize = 0;` before the main loop of audio_processing_task)
-        // For the purpose of this edit, we'll assume it's available.
-        // We'll add it properly in the next step if needed, for now just use a placeholder or assume it's passed.
-        // Let's define it at the beginning of the function. (Add this manually or in a prior edit)
-        // `let mut segment_id_counter: usize = 0;` would be at the start of audio_processing_task.
 
         if current_segment_text.trim().chars().count() > 1 {
-            // This requires segment_id_counter to be defined earlier in the function.
-            // For now, let's assume segment_id_counter is 0, will fix if this is the only place.
-            // No, better to handle it properly. Let's add the counter variable.
-            // The counter should be at the start of the function, before the main loop.
-            // This edit block assumes previous edits have set up segment_id_counter.
-            // We'll need to insert `let mut segment_id_counter: usize = 0;` after model inits.
+            tx.send(AppUpdate::JapaneseSegmentComplete(
+                current_segment_text.clone(),
+            ))
+            .await
+            .ok();
+            tx.send(AppUpdate::StatusUpdate(
+                "Translating to English...".to_string(),
+            ))
+            .await
+            .ok();
 
-            // Send JapaneseSegmentComplete to UI
-            // This assumes segment_id_counter is properly managed in the scope of audio_processing_task
-            // segment_id_counter is now a local mut variable initialized at the function start.
-            ui_tx
-                .send(AppUpdate::JapaneseSegmentComplete {
-                    text: current_segment_text.clone(),
-                    id: segment_id_counter,
-                })
-                .await
-                .ok();
+            tx.send(AppUpdate::StatusUpdate(
+                "Requesting translation from Llama...".to_string(),
+            ))
+            .await
+            .ok();
+            let prompt = format!(
+                "Translate the following Japanese text to English, Output only the English translation. Do not add any pleasantries or extra explanations: \'{}\'",
+                current_segment_text
+            );
+            let mut llama_chat_clone = llama_chat_template.clone();
+            let mut response_stream = llama_chat_clone(&prompt);
+            let translation = response_stream.all_text().await; // Use all_text()
+            // println!("[Debug Llama Output Live]: {}", translation); // Clarified log source
 
-            // Send transcribed text to translation_task
-            if transcription_tx
-                .send((current_segment_text.clone(), segment_id_counter))
-                .await
-                .is_err()
-            {
-                // Handle error: translation task might have shut down
-                eprintln!(
-                    "Failed to send segment to translation task for ID {}.",
-                    segment_id_counter
-                );
-                // Optionally send an error to UI
-                ui_tx
-                    .send(AppUpdate::Error(format!(
-                        "Failed to send segment ID {} to translation queue",
-                        segment_id_counter
-                    )))
+            let status_translation_excerpt = if translation.len() > 20 {
+                let mut end_index = 20;
+                // Ensure we don't panic if the string is shorter than 20 bytes after all,
+                // or if the loop somehow goes below zero (though it shouldn't with valid UTF-8).
+                // We also need to check if the string is empty to avoid panicking on is_char_boundary(0) for an empty string.
+                if translation.is_empty() {
+                    end_index = 0;
+                } else {
+                    while end_index > 0 && !translation.is_char_boundary(end_index) {
+                        end_index -= 1;
+                    }
+                }
+                format!("{}...", &translation[..end_index])
+            } else {
+                translation.clone()
+            };
+            tx.send(AppUpdate::StatusUpdate(format!(
+                "Llama call completed. Got: {}",
+                status_translation_excerpt
+            )))
+            .await
+            .ok();
+
+            if !translation.is_empty() {
+                tx.send(AppUpdate::EnglishTranslation(translation))
                     .await
                     .ok();
+            } else {
+                // Handle cases where translation might be empty
+                tx.send(AppUpdate::EnglishTranslation(
+                    "[No translation generated]".to_string(),
+                ))
+                .await
+                .ok();
             }
-            segment_id_counter += 1; // Increment for the next segment
         } else {
             // Clear live japanese if segment was too short/empty
-            ui_tx
-                .send(AppUpdate::LiveJapaneseUpdate("".to_string()))
+            tx.send(AppUpdate::LiveJapaneseUpdate("".to_string()))
                 .await
                 .ok();
         }
-        ui_tx
-            .send(AppUpdate::StatusUpdate("Listening...".to_string()))
+        tx.send(AppUpdate::StatusUpdate("Listening...".to_string()))
             .await
             .ok();
     }
@@ -755,30 +648,23 @@ async fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel(32); // Channel for AppUpdates
     let is_listening_shared = Arc::new(AtomicBool::new(true)); // Initially listening
 
-    // Channel for transcribed Japanese text (and its ID) to be sent to the translation task
-    let (transcription_tx, transcription_rx) = mpsc::channel::<(String, usize)>(32);
-
-    // Shutdown channel for graceful task termination
-    let (shutdown_tx, shutdown_rx) = watch::channel(());
-
-    // Spawn the audio processing task
-    // It sends UI updates (like status, live Japanese) directly to the main app's `tx`.
-    // It sends completed Japanese segments (text, id) to the `transcription_tx`.
-    let audio_task_handle = tokio::spawn(audio_processing_task(
-        tx.clone(), // This is ui_tx for AppUpdates
-        transcription_tx, // This is for (String, usize) to translation_task
-        is_listening_shared.clone(),
-        shutdown_rx.clone(), // Pass shutdown receiver
-    ));
-
-    // Spawn the translation task
-    // It receives (Japanese text, id) from `transcription_rx`.
-    // It sends UI updates (like EnglishTranslation, status) directly to the main app`'s `tx`.
-    let translation_task_handle = tokio::spawn(translation_task(
-        transcription_rx,
-        tx.clone(), // This is ui_tx for AppUpdates
-        shutdown_rx, // Pass shutdown receiver (can move the original rx here)
-    ));
+    // Clone tx and is_listening_shared for the audio processing task
+    let tx_audio = tx.clone();
+    let is_listening_audio_task = is_listening_shared.clone();
+    tokio::spawn(async move {
+        if let Err(e) = audio_processing_task(tx_audio, is_listening_audio_task).await {
+            // Send error to UI if task fails
+            // The tx channel might be closed if the main app loop has already exited.
+            // We use a let _ to ignore the result of the send, as there's not much we can do
+            // if sending fails here (the UI part is likely gone).
+            let _ = tx
+                .send(AppUpdate::Error(format!(
+                    "Audio processing task failed: {}",
+                    e
+                )))
+                .await;
+        }
+    });
 
     // Setup terminal
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
@@ -809,42 +695,7 @@ async fn main() -> Result<()> {
         // before the terminal is fully restored, or if restoration itself fails.
         eprintln!("Error running app: {:?}", err);
         // Ensure color_eyre's hook can run by returning the error
-        // We might want to await tasks even if app loop errors, to see if they also errored.
-        // For now, returning early.
-        return Err(err);
-    }
-
-    // Signal tasks to shut down
-    eprintln!("Main: Signaling tasks to shut down...");
-    // Sending a value or dropping the sender signals the watch receivers.
-    // Dropping is cleaner if no specific shutdown message is needed.
-    drop(shutdown_tx);
-    // Alternative: shutdown_tx.send(()).ok(); // If you want to send a specific signal
-
-    // Await background tasks
-    eprintln!("Main: Awaiting background tasks completion...");
-    match audio_task_handle.await {
-        Ok(Ok(())) => eprintln!("Audio processing task completed successfully."),
-        Ok(Err(e)) => {
-            eprintln!("Audio processing task failed: {:?}", e);
-            return Err(color_eyre::eyre::eyre!(e));
-        }
-        Err(e) => {
-            eprintln!("Audio processing task panicked or was cancelled: {:?}", e);
-            return Err(color_eyre::eyre::eyre!("Audio processing task panicked"));
-        }
-    }
-
-    match translation_task_handle.await {
-        Ok(Ok(())) => eprintln!("Translation task completed successfully."),
-        Ok(Err(e)) => {
-            eprintln!("Translation task failed: {:?}", e);
-            return Err(color_eyre::eyre::eyre!(e));
-        }
-        Err(e) => {
-            eprintln!("Translation task panicked or was cancelled: {:?}", e);
-            return Err(color_eyre::eyre::eyre!("Translation task panicked"));
-        }
+        return Err(err); // No need for .into() if app.run returns color_eyre::Result
     }
 
     Ok(())
