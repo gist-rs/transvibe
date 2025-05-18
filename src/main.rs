@@ -578,62 +578,69 @@ async fn audio_processing_task(
             .await
             .ok();
 
-            tx.send(AppUpdate::StatusUpdate(
-                "Requesting translation from Llama...".to_string(),
-            ))
-            .await
-            .ok();
-            let prompt = format!(
-                "Translate the following Japanese text to English, Output only the English translation. Do not add any pleasantries or extra explanations: \'{}\'",
-                current_segment_text
-            );
-            let mut llama_chat_clone = llama_chat_template.clone();
-            let mut response_stream = llama_chat_clone(&prompt);
-            let raw_translation = response_stream.all_text().await; // Use all_text()
-            // println!("[Debug Llama Output Live]: {}", raw_translation); // Clarified log source
+            let tx_clone_for_task = tx.clone();
+            let chat_template_for_task = llama_chat_template.clone();
+            let segment_to_translate = current_segment_text.clone();
 
-            // Clean the translation: remove special tokens and trim whitespace
-            let cleaned_translation = raw_translation
-                .replace("<|im_start|>", "")
-                .replace("<|im_end|>", "")
-                .trim()
-                .to_string();
+            tokio::spawn(async move {
+                let prompt = format!(
+                    "Translate the following Japanese text to English, Output only the English translation. Do not add any pleasantries or extra explanations. Do not translate English, keep as is.:\n{}",
+                    segment_to_translate
+                );
 
-            let status_translation_excerpt = if cleaned_translation.len() > 20 {
-                let mut end_index = 20;
-                // Ensure we don't panic if the string is shorter than 20 bytes after all,
-                // or if the loop somehow goes below zero (though it shouldn't with valid UTF-8).
-                // We also need to check if the string is empty to avoid panicking on is_char_boundary(0) for an empty string.
-                if cleaned_translation.is_empty() {
-                    end_index = 0;
-                } else {
-                    while end_index > 0 && !cleaned_translation.is_char_boundary(end_index) {
-                        end_index -= 1;
+                // It's good practice to indicate that the Llama call is starting within the task
+                // tx_clone_for_task.send(AppUpdate::StatusUpdate(
+                //     "Requesting translation from Llama...".to_string(),
+                // ))
+                // .await
+                // .ok();
+
+                let mut llama_chat = chat_template_for_task;
+                let mut response_stream = llama_chat(&prompt);
+                let raw_translation = response_stream.all_text().await;
+                // println!("[Debug Llama Output Live]: {}", raw_translation);
+
+                let cleaned_translation = raw_translation
+                    .replace("<|im_start|>", "")
+                    .replace("<|im_end|>", "")
+                    .trim()
+                    .to_string();
+
+                let _status_translation_excerpt = if cleaned_translation.len() > 20 {
+                    let mut end_index = 20;
+                    if cleaned_translation.is_empty() {
+                        end_index = 0;
+                    } else {
+                        while end_index > 0 && !cleaned_translation.is_char_boundary(end_index) {
+                            end_index -= 1;
+                        }
                     }
-                }
-                format!("{}...", &cleaned_translation[..end_index])
-            } else {
-                cleaned_translation.clone()
-            };
-            tx.send(AppUpdate::StatusUpdate(format!(
-                "Llama call completed. Got: {}",
-                status_translation_excerpt
-            )))
-            .await
-            .ok();
+                    format!("{}...", &cleaned_translation[..end_index])
+                } else {
+                    cleaned_translation.clone()
+                };
+                // This status update can be useful to confirm the task completed
+                // tx_clone_for_task.send(AppUpdate::StatusUpdate(format!(
+                //     "Llama call completed. Got: {}",
+                //     status_translation_excerpt
+                // )))
+                // .await
+                // .ok();
 
-            if !cleaned_translation.is_empty() {
-                tx.send(AppUpdate::EnglishTranslation(cleaned_translation))
-                    .await
-                    .ok();
-            } else {
-                // Handle cases where translation might be empty
-                tx.send(AppUpdate::EnglishTranslation(
-                    "[No translation generated]".to_string(),
-                ))
-                .await
-                .ok();
-            }
+                if !cleaned_translation.is_empty() {
+                    tx_clone_for_task
+                        .send(AppUpdate::EnglishTranslation(cleaned_translation))
+                        .await
+                        .ok();
+                } else {
+                    tx_clone_for_task
+                        .send(AppUpdate::EnglishTranslation(
+                            "[No translation generated]".to_string(),
+                        ))
+                        .await
+                        .ok();
+                }
+            });
         } else {
             // Clear live japanese if segment was too short/empty
             tx.send(AppUpdate::LiveJapaneseUpdate("".to_string()))
