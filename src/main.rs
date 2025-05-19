@@ -336,18 +336,24 @@ impl App {
             .split(main_layout[2]);
 
         // Japanese Transcript Panel
-        let japanese_lines: Vec<Line> = self // These are already styled lines
+        let japanese_lines: Vec<Line> = self
             .completed_japanese
             .iter()
             .enumerate()
-            .map(|(i, s)| {
+            .flat_map(|(i, s)| {
                 let style = if i == 0 {
                     // Highlight the first line (newest)
                     Style::new().fg(Color::White)
                 } else {
                     Style::new().fg(Color::DarkGray)
                 };
-                Line::from(s.as_str()).style(style)
+                let content_line = Line::from(s.as_str()).style(style);
+                if i == 0 { // Newest item, don't add preceding blank line
+                    vec![content_line]
+                } else {
+                    // Add a blank line before older items for separation
+                    vec![Line::from(""), content_line]
+                }
             })
             .collect();
 
@@ -377,18 +383,24 @@ impl App {
         );
 
         // English Translation Panel
-        let english_lines: Vec<Line> = self // These are already styled lines
+        let english_lines: Vec<Line> = self
             .completed_translations
             .iter()
             .enumerate()
-            .map(|(i, s)| {
+            .flat_map(|(i, s)| {
                 let style = if i == 0 {
                     // Highlight the first line (newest)
                     Style::new().fg(Color::White)
                 } else {
                     Style::new().fg(Color::DarkGray)
                 };
-                Line::from(s.as_str()).style(style)
+                let content_line = Line::from(s.as_str()).style(style);
+                 if i == 0 { // Newest item
+                    vec![content_line]
+                } else {
+                    // Add a blank line before older items
+                    vec![Line::from(""), content_line]
+                }
             })
             .collect();
 
