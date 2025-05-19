@@ -566,7 +566,7 @@ async fn audio_processing_task(
             }
         }
 
-        if current_segment_text.trim().chars().count() > 1 {
+        if current_segment_text.trim().chars().count() > 0 {
             tx.send(AppUpdate::JapaneseSegmentComplete(
                 current_segment_text.clone(),
             ))
