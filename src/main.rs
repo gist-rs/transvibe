@@ -525,7 +525,10 @@ async fn audio_processing_task(
                     .ok();
             }
         })
-        .rechunk_voice_activity();
+        .rechunk_voice_activity()
+        .with_end_window(std::time::Duration::from_millis(400)) // More sensitive end window
+        .with_end_threshold(0.25) // Slightly higher end threshold
+        .with_time_before_speech(std::time::Duration::from_millis(200)); // Reduce pre-speech buffer
 
     loop {
         if !is_listening_shared.load(Ordering::Relaxed) {
