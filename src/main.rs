@@ -181,6 +181,10 @@ impl App {
                     }
 
                     // Mode-specific keybindings
+                    if key.kind == KeyEventKind::Press && key.code == KeyCode::Esc {
+                        self.should_quit = true;
+                        return Ok(());
+                    }
                     match self.input_mode {
                         AppInputMode::Listening => match key.code {
                             KeyCode::Char('q') => {
@@ -348,7 +352,8 @@ impl App {
                     Style::new().fg(Color::DarkGray)
                 };
                 let content_line = Line::from(s.as_str()).style(style);
-                if i == 0 { // Newest item, don't add preceding blank line
+                if i == 0 {
+                    // Newest item, don't add preceding blank line
                     vec![content_line]
                 } else {
                     // Add a blank line before older items for separation
@@ -395,7 +400,8 @@ impl App {
                     Style::new().fg(Color::DarkGray)
                 };
                 let content_line = Line::from(s.as_str()).style(style);
-                 if i == 0 { // Newest item
+                if i == 0 {
+                    // Newest item
                     vec![content_line]
                 } else {
                     // Add a blank line before older items
